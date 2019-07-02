@@ -17,18 +17,19 @@ const char * PSK = STAPSK;
 ESP8266WebServer server(80);
 
 // Digital pin connected to the DHT sensor
-#define DHTPIN 1
+#define DHTPIN 2
 #define DHTTYPE DHT11   // DHT 11
 
 DHT dht(DHTPIN, DHTTYPE);
 
-float h;
-float t;
-float hic;
+float s_humid;
+float s_temp;
+float s_hidx;
+int   s_errs = 0;
 
 //int led = 0; // TXD!!!
 
-#define SERDEBUG 1
+//#define SERDEBUG 1
 
 void setup() {
   Serial.begin(115200);
@@ -85,22 +86,30 @@ void setup() {
 
 void dhtloop() {
   // Wait a few seconds between measurements.
-  //delay(1000);
+  delay(100);
 
   // Reading temperature or humidity takes about 250 milliseconds!
   // Sensor readings may also be up to 2 seconds 'old' (its a very slow sensor)
-  h = dht.readHumidity();
+  float h = dht.readHumidity();
   // Read temperature as Celsius (the default)
-  t = dht.readTemperature();
+  float t = dht.readTemperature();
 
   // Check if any reads failed and exit early (to try again).
   if (isnan(h) || isnan(t)) {
+#if SERDEBUG
     Serial.println(F("Failed to read from DHT sensor!"));
+#endif
+    s_errs++;
     return;
   }
 
   // Compute heat index in Celsius (isFahreheit = false)
-  hic = dht.computeHeatIndex(t, h, false);
+  float hic = dht.computeHeatIndex(t, h, false);
+
+  s_temp = t;
+  s_humid = h;
+  s_hidx = hic;
+  s_errs = 0;
 
 #if SERDEBUG
   Serial.print(F("Humidity: "));
@@ -116,7 +125,9 @@ void dhtloop() {
 }
 
 void handleRoot() {
-  server.send(200, "text/plain", "{ node: "++", temp: "+t+", humid: "+h+", hindex:"+hic+" }");
+  auto node = WiFi.localIP().toString();
+  String message = "{ node: '"+node+"', temp: "+s_temp+", humid: "+s_humid+", hindex: "+s_hidx+ ", err: "+ s_errs + " }";
+  server.send(200, "text/plain", message);
 }
 
 void handleNotFound() {
