@@ -6,10 +6,16 @@
 #define DHT_DEBUG
 #include <DHT.h>
 
+// Generic ESP 8266
+// 3V power
+// To program lock GPIO0 to GND !
+// 115200 serial debug output!
+
 #include "user_interface.h"
 
-#define STASSID "WiFiSirenevaya8VL2"
-#define STAPSK  "12345678"
+#define STASSID "WiFiSirenevaya8V"
+//#define STASSID "WifiSirenevaya8VL2"
+#define STAPSK  "34567890"
 
 const char * SSID = STASSID;
 const char * PSK = STAPSK;
