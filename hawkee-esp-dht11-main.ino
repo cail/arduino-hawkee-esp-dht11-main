@@ -3,7 +3,7 @@
 #include <WiFiClientSecure.h>
 #include <ESP8266WebServer.h>
 #include <ESP8266mDNS.h>
-#include <InfluxDb.h>
+#include <InfluxDbClient.h>
 #include <DHT.h>
 #include "user_interface.h"
 #include <OneWire.h>
@@ -26,32 +26,44 @@
  * 25-04: 6 days 3*2700mah
  * 
  * esp-12f: 66ma wifi, 600ua deepsleep - HOORAAY!
+ *          actually 2ma deepsleep (
+ *        15 days 3*2700mah !!!
+ * 
+ * cut power converter:
+ *        0.08 - 0.12 ma
  * 
  */
 
-#define STASSID { "WiFiSirenevaya8V", "IOT", "HOME", }
+#define STASSID { "WiFiSirenevaya8V", "WifiSirenevaya8VL2", "IOT", }
 
-#define STAPSK  { "34567890", "56789012", "12345678", "" }
+#define STAPSK  { "34567890", "34567890", "12345678", }
 
-#define INFLUXDB_HOST "us-west-2-1.aws.cloud2.influxdata.com"
-#define INFLUXDB_FINGER "9B 62 0A 63 8B B1 D2 CA 5E DF 42 6E A3 EE 1F 19 36 48 71 1F"
+#define INFLUXDB_HOST "https://us-west-2-1.aws.cloud2.influxdata.com:443"
+#define INFLUX_ORG "irusskih@gmail.com"
+#define INFLUX_BUCKET "dom3"
 
 // Digital pin connected to the DHT sensor
+#define DHTPOWER_PIN  4
 #define DHTPIN  2
 #define DHTTYPE DHT11
 
+// PIN for one wire temps
 #define ONE_WIRE_BUS 0
+// Search for dallas tems on onewire
+#define READ_DALLAS 1
 
-#define READ_DALLAS 0
-
+// Simple light sleep
 #define POWER_SAVE 0
 
+// Deep sleep. need HW PIN 16 attached to RST!
 #define POWER_SAVE_DEEP 1
 
-/*
+#define WIFI_SCAN_ONCE 1
+
+///*
 #define USESERIAL 1
-#define SERDEBUG 1
-#define SERVER 1
+#define SERDEBUG 0
+#define SERVER 0
 /*/
 #define USESERIAL 0
 #define SERDEBUG 0
@@ -68,7 +80,8 @@
 
 #define ARRAY_SIZE(x) (sizeof(x)/sizeof(x[0]))
 
-Influxdb influx(INFLUXDB_HOST);
+
+InfluxDBClient influx(INFLUXDB_HOST, INFLUX_ORG, INFLUX_BUCKET, INFLUX_TOKEN);
 
 #if SERVER
 ESP8266WebServer server(80);
@@ -83,8 +96,8 @@ float s_hidx;
 int   s_errs = 0;
 uint32 s_tick = 0;
 
-int s_sleep = 5*60*1000;
-//int s_sleep = 10*1000;
+int s_sleep = 10*60*1000;
+//int s_sleep = 30*1000;
 
 OneWire oneWire(ONE_WIRE_BUS);
 // Pass our oneWire reference to Dallas Temperature. 
@@ -119,7 +132,7 @@ void getAddress(DeviceAddress deviceAddress, char *dname)
 int ssid_idx_stored = -1;
 int psk_idx_stored = -1;
 
-void connect()
+int connect()
 {
   int ssid_idx = 0;
   int psk_idx = 0;
@@ -138,6 +151,11 @@ void connect()
     }
     SERIAL_PRINT("WiFi Status: ");
     SERIAL_PRINTLN(WiFi.status());
+
+#if WIFI_SCAN_ONCE
+    if (ssid_idx+1 >= ARRAY_SIZE(SSIDS))
+      return -1;
+#endif
     
     ssid_idx = (ssid_idx+1) % ARRAY_SIZE(SSIDS);
     psk_idx = (psk_idx+1) % ARRAY_SIZE(PSKS);
@@ -168,6 +186,15 @@ void connect()
   server.begin();
 #endif
 
+
+// Synchronize UTC time with NTP servers
+// Accurate time is necessary for certificate validaton and writing in batches
+//configTime(0, 0, "pool.ntp.org", "time.nis.gov");
+// Set timezone
+//setenv("TZ", "PST8PDT", 1);
+
+  return 0;
+
 }
 
 void setup() {
@@ -177,18 +204,18 @@ void setup() {
   //Serial.setDebugOutput(true);
 #endif
 
-  connect();
-
   SERIAL_PRINTLN("DHT Init");
+#ifdef DHTPOWER_PIN
+  pinMode(DHTPOWER_PIN, OUTPUT);
+  digitalWrite(DHTPOWER_PIN, 1);
+#endif
   dht.begin();
 
   SERIAL_PRINTLN("Influx Init");
-  influx.setBucket("69740d3d80cb3f3e");
-  influx.setOrg("04ee1a142e69eece");
-  influx.setPort(443);
-  influx.setToken("zX949yFx6PX_H5AlfmM0Ijrvbi7dlP1SevnxKdzQcH5JwAqyg0VW5tniTe09ZvMS0Cy2WmQwwU3xvvSZ7vzYiw==");
-  influx.setVersion(2);
-  influx.setFingerPrint(INFLUXDB_FINGER);
+  // second param - batch data size
+  influx.setWriteOptions(WritePrecision::NoTime, 10);
+  influx.setInsecure(true);
+
 }
 
 void read_sensors() {
@@ -209,6 +236,7 @@ void read_sensors() {
     dht.begin();
   } else {
 
+    s_is_read_dht = true;
     // Compute heat index in Celsius (isFahreheit = false)
     float hic = dht.computeHeatIndex(t, h, false);
   
@@ -235,15 +263,15 @@ void read_sensors() {
 void report_sensors()
 {
   if (s_is_read_dht) {
-    InfluxData row("temperature");
+    Point row("temperature");
     row.addTag("device", WiFi.macAddress());
-    row.addValue("value", s_temp);
-    influx.prepare(row);
+    row.addField("value", s_temp);
+    influx.writePoint(row);
   
-    InfluxData row1("humidity");
+    Point row1("humidity");
     row1.addTag("device", WiFi.macAddress());
-    row1.addValue("value", s_humid);
-    influx.prepare(row1);
+    row1.addField("value", s_humid);
+    influx.writePoint(row1);
   }
 
 #if READ_DALLAS
@@ -283,23 +311,27 @@ void report_sensors()
     SERIAL_PRINT(tempC);
     SERIAL_PRINTLN();
 
-    InfluxData rowt("temperature");
+    Point rowt("temperature");
     //rowt.addTag("device", WiFi.macAddress());
     rowt.addTag("device", dname);
-    rowt.addValue("value", tempC);
-    influx.prepare(rowt);
+    rowt.addField("value", tempC);
+    influx.writePoint(rowt);
   }
 
 #endif
 
-  InfluxData row2("stats");
-  row2.addTag("device", WiFi.macAddress());
-  row2.addValue("uptime", s_tick*s_sleep/1000);
-  row2.addValue("err", s_errs);
-  row2.addValue("vcc", ESP.getVcc());
-  influx.prepare(row2);
-  
-  influx.write();
+
+  Point rowx("stats");
+  rowx.addTag("device", WiFi.macAddress());
+  rowx.addField("uptime", s_tick*s_sleep/1000);
+  rowx.addField("err", s_errs);
+  rowx.addField("vcc", ESP.getVcc());
+  influx.writePoint(rowx);
+
+  int res = influx.flushBuffer();
+
+  SERIAL_PRINT("Data sent result: ");
+  SERIAL_PRINTLN(res);  
 
 }
 
@@ -330,23 +362,30 @@ void handleNotFound() {
 void loop(void) {
 
   bool toReconnect = false;
+  int err = 0;
+    
   if (WiFi.status() != WL_CONNECTED) {
     SERIAL_PRINTLN("Нет соединения WiFi");
     toReconnect = true;
   }
+
   if (toReconnect) {
-    connect();
+    err = connect();   
   }
 
+
+  if (!err)
+  {
 #if SERVER
-  server.handleClient();
-  MDNS.update();
+    server.handleClient();
+    MDNS.update();
 #endif
 
-  read_sensors();
-  report_sensors();
-
-  //ESP.wdtEnable(5000);
+    read_sensors();
+    report_sensors();
+  
+    //ESP.wdtEnable(5000);
+  }
 
 #if POWER_SAVE
   WiFi.persistent(false);
@@ -363,6 +402,9 @@ void loop(void) {
   ESP.deepSleep(s_sleep*1000);
   // will not return
   //ESP.deepSleep(10*1000*1000, WAKE_RF_DISABLED);
+#ifdef DHTPOWER_PIN
+  digitalWrite(DHTPOWER_PIN, 0);
+#endif
 #endif
 
   delay(s_sleep);
